@@ -1,241 +1,215 @@
-// Copyright 2016 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+import {
+  Address,
+  PrivateKey,
+  Signature,
+  ViewKey,
+  PrivateKeyCiphertext,
+  RecordCiphertext,
+} from "./index";
 
-/*
-Package hexutil implements hex encoding with 0x prefix.
-This encoding is used by the Ethereum RPC API to transport binary data in JSON payloads.
-
-# Encoding Rules
-
-All hex data must have prefix "0x".
-
-For byte slices, the hex data must be of even length. An empty byte slice
-encodes as "0x".
-
-Integers are encoded using the least amount of digits (no leading zero digits). Their
-encoding may be of uneven length. The number zero encodes as "0x0".
-*/
-package hexutil
-
-import (
-	"encoding/hex"
-	"fmt"
-	"math/big"
-	"strconv"
-)
-
-const uintBits = 32 << (uint64(^uint(0)) >> 63)
-
-// Errors
-var (
-	ErrEmptyString   = &decError{"empty hex string"}
-	ErrSyntax        = &decError{"invalid hex string"}
-	ErrMissingPrefix = &decError{"hex string without 0x prefix"}
-	ErrOddLength     = &decError{"hex string of odd length"}
-	ErrEmptyNumber   = &decError{"hex string \"0x\""}
-	ErrLeadingZero   = &decError{"hex number with leading zero digits"}
-	ErrUint64Range   = &decError{"hex number > 64 bits"}
-	ErrUintRange     = &decError{fmt.Sprintf("hex number > %d bits", uintBits)}
-	ErrBig256Range   = &decError{"hex number > 256 bits"}
-)
-
-type decError struct{ msg string }
-
-func (err decError) Error() string { return err.msg }
-
-// Decode decodes a hex string with 0x prefix.
-func Decode(input string) ([]byte, error) {
-	if len(input) == 0 {
-		return nil, ErrEmptyString
-	}
-	if !has0xPrefix(input) {
-		return nil, ErrMissingPrefix
-	}
-	b, err := hex.DecodeString(input[2:])
-	if err != nil {
-		err = mapError(err)
-	}
-	return b, err
+interface AccountParam {
+  privateKey?: string;
+  seed?: Uint8Array;
 }
 
-// MustDecode decodes a hex string with 0x prefix. It panics for invalid input.
-func MustDecode(input string) []byte {
-	dec, err := Decode(input)
-	if err != nil {
-		panic(err)
-	}
-	return dec
-}
+/**
+ * Key Management class. Enables the creation of a new Aleo Account, importation of an existing account from
+ * an existing private key or seed, and message signing and verification functionality.
+ *
+ * An Aleo Account is generated from a randomly generated seed (number) from which an account private key, view key,
+ * and a public account address are derived. The private key lies at the root of an Aleo account. It is a highly
+ * sensitive secret and should be protected as it allows for creation of Aleo Program executions and arbitrary value
+ * transfers. The View Key allows for decryption of a user's activity on the blockchain. The Address is the public
+ * address to which other users of Aleo can send Aleo credits and other records to. This class should only be used
+ * environments where the safety of the underlying key material can be assured.
+ *
+ * @example
+ * // Create a new account
+ * const myRandomAccount = new Account();
+ *
+ * // Create an account from a randomly generated seed
+ * const seed = new Uint8Array([94, 91, 52, 251, 240, 230, 226, 35, 117, 253, 224, 210, 175, 13, 205, 120, 155, 214, 7, 169, 66, 62, 206, 50, 188, 40, 29, 122, 40, 250, 54, 18]);
+ * const mySeededAccount = new Account({seed: seed});
+ *
+ * // Create an account from an existing private key
+ * const myExistingAccount = new Account({privateKey: 'myExistingPrivateKey'})
+ *
+ * // Sign a message
+ * const hello_world = Uint8Array.from([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100])
+ * const signature = myRandomAccount.sign(hello_world)
+ *
+ * // Verify a signature
+ * myRandomAccount.verify(hello_world, signature)
+ */
+export class Account {
+  private _privateKey: PrivateKey;
+  private _viewKey: ViewKey;
+  private _address: Address;
 
-// Encode encodes b as a hex string with 0x prefix.
-func Encode(b []byte) string {
-	enc := make([]byte, len(b)*2+2)
-	copy(enc, "0x")
-	hex.Encode(enc[2:], b)
-	return string(enc)
-}
+  constructor(params: AccountParam = {}) {
+    try {
+      this._privateKey = this.privateKeyFromParams(params);
+    } catch (e) {
+      console.error("Failed to initialize account:", e);
+      throw new Error("Failed to initialize account.");
+    }
+    this._viewKey = ViewKey.from_private_key(this._privateKey);
+    this._address = Address.from_private_key(this._privateKey);
+  }
 
-// DecodeUint64 decodes a hex string with 0x prefix as a quantity.
-func DecodeUint64(input string) (uint64, error) {
-	raw, err := checkNumber(input)
-	if err != nil {
-		return 0, err
-	}
-	dec, err := strconv.ParseUint(raw, 16, 64)
-	if err != nil {
-		err = mapError(err)
-	}
-	return dec, err
-}
+  /**
+   * Attempts to create an account from a private key ciphertext
+   * @param {PrivateKeyCiphertext | string} ciphertext
+   * @param {string} password
+   * @returns {Account}
+   *
+   * @example
+   * const ciphertext = PrivateKey.newEncrypted("password");
+   * const account = Account.fromCiphertext(ciphertext, "password");
+   */
+  public static fromCiphertext(ciphertext: PrivateKeyCiphertext | string, password: string): Account {
+    try {
+      ciphertext = (typeof ciphertext === "string") ? PrivateKeyCiphertext.fromString(ciphertext) : ciphertext;
+      const privateKey = PrivateKey.fromPrivateKeyCiphertext(ciphertext, password);
+      return new Account({ privateKey: privateKey.to_string() });
+    } catch(e) {
+      console.error("Failed to create account from ciphertext:", e);
+      throw new Error("Failed to create account from ciphertext.");
+    }
+  }
 
-// MustDecodeUint64 decodes a hex string with 0x prefix as a quantity.
-// It panics for invalid input.
-func MustDecodeUint64(input string) uint64 {
-	dec, err := DecodeUint64(input)
-	if err != nil {
-		panic(err)
-	}
-	return dec
-}
+  private privateKeyFromParams(params: AccountParam): PrivateKey {
+    if (params.seed) {
+      return PrivateKey.from_seed_unchecked(params.seed);
+    }
+    if (params.privateKey) {
+      return PrivateKey.from_string(params.privateKey);
+    }
+    return new PrivateKey();
+  }
 
-// EncodeUint64 encodes i as a hex string with 0x prefix.
-func EncodeUint64(i uint64) string {
-	enc := make([]byte, 2, 10)
-	copy(enc, "0x")
-	return string(strconv.AppendUint(enc, i, 16))
-}
+  get privateKey(): PrivateKey {
+    return this._privateKey;
+  }
 
-var bigWordNibbles int
+  get viewKey(): ViewKey {
+    return this._viewKey;
+  }
 
-func init() {
-	// This is a weird way to compute the number of nibbles required for big.Word.
-	// The usual way would be to use constant arithmetic but go vet can't handle that.
-	b, _ := new(big.Int).SetString("FFFFFFFFFF", 16)
-	switch len(b.Bits()) {
-	case 1:
-		bigWordNibbles = 16
-	case 2:
-		bigWordNibbles = 8
-	default:
-		panic("weird big.Word size")
-	}
-}
+  get address(): Address {
+    return this._address;
+  }
 
-// DecodeBig decodes a hex string with 0x prefix as a quantity.
-// Numbers larger than 256 bits are not accepted.
-func DecodeBig(input string) (*big.Int, error) {
-	raw, err := checkNumber(input)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > 64 {
-		return nil, ErrBig256Range
-	}
-	words := make([]big.Word, len(raw)/bigWordNibbles+1)
-	end := len(raw)
-	for i := range words {
-		start := end - bigWordNibbles
-		if start < 0 {
-			start = 0
-		}
-		for ri := start; ri < end; ri++ {
-			nib := decodeNibble(raw[ri])
-			if nib == badNibble {
-				return nil, ErrSyntax
-			}
-			words[i] *= 16
-			words[i] += big.Word(nib)
-		}
-		end = start
-	}
-	dec := new(big.Int).SetBits(words)
-	return dec, nil
-}
+  toString(): string {
+    return this.address.to_string();
+  }
 
-// MustDecodeBig decodes a hex string with 0x prefix as a quantity.
-// It panics for invalid input.
-func MustDecodeBig(input string) *big.Int {
-	dec, err := DecodeBig(input)
-	if err != nil {
-		panic(err)
-	}
-	return dec
-}
+  /**
+   * Encrypt the account's private key with a password
+   * @param {string} password
+   * @returns {PrivateKeyCiphertext}
+   *
+   * @example
+   * const account = new Account();
+   * const ciphertext = account.encryptAccount("password");
+   */
+  encryptAccount(password: string): PrivateKeyCiphertext {
+    return this._privateKey.toCiphertext(password);
+  }
 
-// EncodeBig encodes bigint as a hex string with 0x prefix.
-func EncodeBig(bigint *big.Int) string {
-	if sign := bigint.Sign(); sign == 0 {
-		return "0x0"
-	} else if sign > 0 {
-		return "0x" + bigint.Text(16)
-	} else {
-		return "-0x" + bigint.Text(16)[1:]
-	}
-}
+  /**
+   * Decrypts a Record in ciphertext form into plaintext
+   * @param {string} ciphertext
+   * @returns {Record}
+   *
+   * @example
+   * const account = new Account();
+   * const record = account.decryptRecord("record1ciphertext");
+   */
+  decryptRecord(ciphertext: string) {
+    return this._viewKey.decrypt(ciphertext);
+  }
 
-func has0xPrefix(input string) bool {
-	return len(input) >= 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X')
-}
+  /**
+   * Decrypts an array of Records in ciphertext form into plaintext
+   * @param {string[]} ciphertexts
+   * @returns {Record[]}
+   *
+   * @example
+   * const account = new Account();
+   * const record = account.decryptRecords(["record1ciphertext", "record2ciphertext"]);
+   */
+  decryptRecords(ciphertexts: string[]) {
+    return ciphertexts.map((ciphertext) => this._viewKey.decrypt(ciphertext));
+  }
 
-func checkNumber(input string) (raw string, err error) {
-	if len(input) == 0 {
-		return "", ErrEmptyString
-	}
-	if !has0xPrefix(input) {
-		return "", ErrMissingPrefix
-	}
-	input = input[2:]
-	if len(input) == 0 {
-		return "", ErrEmptyNumber
-	}
-	if len(input) > 1 && input[0] == '0' {
-		return "", ErrLeadingZero
-	}
-	return input, nil
-}
+  /**
+   * Determines whether the account owns a ciphertext record
+   * @param {RecordCipherText | string} ciphertext
+   * @returns {boolean}
+   *
+   * @example
+   * // Create a connection to the Aleo network and an account
+   * const connection = new NodeConnection("vm.aleo.org/api");
+   * const account = Account.fromCiphertext("ciphertext", "password");
+   *
+   * // Get a record from the network
+   * const record = connection.getBlock(1234);
+   * const recordCipherText = record.transactions[0].execution.transitions[0].id;
+   *
+   * // Check if the account owns the record
+   * if account.ownsRecord(recordCipherText) {
+   *     // Then one can do something like:
+   *     // Decrypt the record and check if it's spent
+   *     // Store the record in a local database
+   *     // Etc.
+   * }
+   */
+  ownsRecordCiphertext(ciphertext: RecordCiphertext | string): boolean {
+    if (typeof ciphertext === 'string') {
+      try {
+        const ciphertextObject = RecordCiphertext.fromString(ciphertext);
+        return ciphertextObject.isOwner(this._viewKey);
+      }
+      catch (e) {
+        return false;
+      }
+    }
+    else {
+      return ciphertext.isOwner(this._viewKey);
+    }
+  }
 
-const badNibble = ^uint64(0)
+  /**
+   * Signs a message with the account's private key.
+   * Returns a Signature.
+   *
+   * @param {Uint8Array} message
+   * @returns {Signature}
+   *
+   * @example
+   * const account = new Account();
+   * const message = Uint8Array.from([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100])
+   * account.sign(message);
+   */
+  sign(message: Uint8Array): Signature {
+    return this._privateKey.sign(message);
+  }
 
-func decodeNibble(in byte) uint64 {
-	switch {
-	case in >= '0' && in <= '9':
-		return uint64(in - '0')
-	case in >= 'A' && in <= 'F':
-		return uint64(in - 'A' + 10)
-	case in >= 'a' && in <= 'f':
-		return uint64(in - 'a' + 10)
-	default:
-		return badNibble
-	}
-}
-
-func mapError(err error) error {
-	if err, ok := err.(*strconv.NumError); ok {
-		switch err.Err {
-		case strconv.ErrRange:
-			return ErrUint64Range
-		case strconv.ErrSyntax:
-			return ErrSyntax
-		}
-	}
-	if _, ok := err.(hex.InvalidByteError); ok {
-		return ErrSyntax
-	}
-	if err == hex.ErrLength {
-		return ErrOddLength
-	}
-	return err
+  /**
+   * Verifies the Signature on a message.
+   *
+   * @param {Uint8Array} message
+   * @param {Signature} signature
+   * @returns {boolean}
+   *
+   * @example
+   * const account = new Account();
+   * const message = Uint8Array.from([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100])
+   * const signature = account.sign(message);
+   * account.verify(message, signature);
+   */
+  verify(message: Uint8Array, signature: Signature): boolean {
+    return this._address.verify(message, signature);
+  }
 }
